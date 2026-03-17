@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SkiMotion LED Race Control</title>
+    <!-- Librerías de MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    <!-- Librería Paho MQTT para Web -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js" type="text/javascript"></script>
+    
+    <style>
+        /* Estilos Generales y Tema Oscuro */
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #121212; color: #ffffff;
+            margin: 0; display: flex; flex-direction: column;
+            align-items: center; padding: 10px; overflow-x: hidden;
+        }
+        
+        /* Contenedor principal de la cámara MÁS GRANDE */
+        .container { 
+            position: relative; width: 100%; max-width: 1280px; /* Ampliado */
+            margin-top: 10px; border-radius: 12px; overflow: hidden;
+            box-shadow: 0 8px 30px rgba(0,0,0,0.8);
+        }
+        video { display: none; }
+        canvas {
+            width: 100%; height: auto; background-color: #000; display: block;
+            aspect-ratio: 16 / 9; /* Mantiene la proporción HD */
+        }
+
+        /* --- UI Superpuesta en la Cámara --- */
+        .overlay-ui {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; display: flex; flex-direction: column;
+            justify-content: space-between; padding: 25px; box-sizing: border-box;
+        }
+
+        /* === VELOCÍMETRO CIRCULAR F1 === */
+        .f1-speedometer {
+            position: relative; width: 180px; height: 180px;
+            background: rgba(0, 0, 0, 0.6); border-radius: 50%;
+            box-shadow: 0 0 20px rgba(0,0,0,0.8); align-self: flex-start;
+        }
+        .f1-speedometer svg {
+            width: 100%; height: 100%;
+            transform: rotate(-135deg); /* Rota para que el arco empiece abajo a la izquierda */
+        }
+        .f1-speedometer circle {
+            fill: none; stroke-width: 12; stroke-linecap: round;
+        }
+        .speed-track { stroke: #333; }
+        .speed-arc { 
+            stroke: #ff0000; 
+            stroke-dasharray: 440; /* 2 * PI * r (r=70) ~= 440 */
+            stroke-dashoffset: 440; /* Completamente vacío al inicio */
+            transition: stroke-dashoffset 0.2s ease-out;
+        }
+        .speed-data {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            text-align: center; color: white;
+        }
+        .speed-value {
+            font-size: 3rem; font-weight: bold; font-family: 'Courier New', Courier, monospace;
+            text-shadow: 0 0 10px rgba(255,255,255,0.5); line-height: 1; margin-top: 5px;
+        }
+        .speed-unit { font-size: 1rem; color: #ff3333; font-weight: bold; letter-spacing: 1px;}
+        .player-label { font-size: 0.8rem; color: #aaa; background: #222; padding: 2px 8px; border-radius: 10px; margin-top: 5px; display: inline-block;}
+
+        /* Contador de Repeticiones */
+        .counter-box {
+            align-self: flex-end; background: rgba(0,0,0,0.6);
+            padding: 10px 25px; border-radius: 10px; font-size: 1.5rem; font-weight: bold;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+        }
+        #count { color: #4CAF50; font-size: 3rem; }
+
+        /* --- Botones --- */
+        button {
+            background-color: #0288d1; color: white; border: none;
+            padding: 10px 15px; border-radius: 5px; cursor: pointer;
+            font-size: 1rem; font-weight: bold; transition: 0.3s; pointer-events: auto;
+        }
+        button:hover { background-color: #0277bd; }
+        button.danger { background-color: #d32f2f; }
+        button.success { background-color: #388e3c; }
+        button.warning { background-color: #f57c00; }
+        button.action { background-color: #673ab7; margin-bottom: 10px;}
+
+        /* --- Ventana Modal --- */
+        .modal {
+            display: none; position: fixed; z-index: 1000; left: 0; top: 0;
+            width: 100%; height: 100%; background-color: rgba(0,0,0,0.8);
+            align-items: center; justify-content: center;
+        }
+        .modal-content {
+            background-color: #1e1e1e; padding: 25px; border-radius: 10px;
+            width: 90%; max-width: 600px; box-shadow: 0 5px 25px rgba(0,0,0,0.9);
+            position: relative; border: 1px solid #333;
+        }
+        .close-btn {
+            position: absolute; top: 15px; right: 20px; color: #aaa;
+            font-size: 28px; font-weight: bold; cursor: pointer;
+        }
+        .close-btn:hover { color: white; }
+        .config-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); 
+            gap: 15px; margin-bottom: 20px; margin-top: 15px;
+        }
+        .config-item { display: flex; flex-direction: column; }
+        .config-item label { font-size: 0.85rem; color: #aaa; margin-bottom: 5px; }
+        .config-item input, .config-item select {
+            background-color: #2c2c2c; color: white; border: 1px solid #444;
+            padding: 8px; border-radius: 5px; font-size: 1rem;
+        }
+        
+        #status-indicator { padding: 5px 15px; border-radius: 20px; font-size: 1rem; font-weight: bold; background-color: #ff9800; pointer-events: auto;}
+        #mqtt-status { padding: 5px 15px; border-radius: 20px; font-size: 0.9rem; font-weight: bold; background-color: #d32f2f; color: white; }
+
+        .race-controls { display: flex; gap: 10px; justify-content: space-between; border-top: 1px solid #333; padding-top: 15px; flex-wrap: wrap;}
+    </style>
+</head>
+<body>
+
+    <h2 style="margin: 5px 0;">⛷️ SkiMotion F1 Racing</h2>
+    
+    <div style="display: flex; gap: 15px; align-items: center; margin-bottom: 5px;">
+        <button class="action" onclick="openModal()">⚙️ Configuración</button>
+        <span id="status-indicator">Iniciando cámara...</span>
+        <button id="btn-pause" class="warning" onclick="togglePause()">⏸️ Pausar</button>
+    </div>
+
+    <!-- MODAL DE CONFIGURACIÓN -->
+    <div id="configModal" class="modal">
+        <div class="modal-content">
+            <span class="close-btn" onclick="closeModal()">&times;</span>
+            <h3>⚙️ Configuración del ESP8266</h3>
+            
+            <div class="config-grid">
+                <div class="config-item">
+                    <label>Broker MQTT (IP o URL):</label>
+                    <input type="text" id="mqtt-host" value="192.168.1.1">
+                </div>
+                <div class="config-item">
+                    <label>Puerto WebSockets:</label>
+                    <input type="number" id="mqtt-port" value="9001">
+                </div>
+                <div class="config-item">
+                    <label>Ruta (Generalmente / o /mqtt):</label>
+                    <input type="text" id="mqtt-path" value="/">
+                </div>
+                <div class="config-item">
+                    <label>Prefijo Pista (Ej. track01):</label>
+                    <input type="text" id="mqtt-prefix" value="track01">
+                </div>
+                <div class="config-item">
+                    <label>Cámara actual para:</label>
+                    <select id="player-select" onchange="updateUIColors()">
+                        <option value="greencar">🟢 Coche Verde (P1)</option>
+                        <option value="redcar">🔴 Coche Rojo (P2)</option>
+                    </select>
+                </div>
+            </div>
+            
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                <button onclick="connectMQTT()">🔌 Conectar a MQTT</button>
+                <span id="mqtt-status">Desconectado</span>
+            </div>
+
+            <div class="race-controls">
+                <button class="success" onclick="sendF1Start()">🚦 SALIDA F1</button>
+                <div style="display:flex; gap:5px; align-items: center;">
+                    <input type="number" id="laps-input" value="5" min="1" max="99" style="width: 50px; background:#2c2c2c; color:white; border:1px solid #444; padding:8px; border-radius:5px;">
+                    <button class="warning" onclick="sendLaps()">⚙️ Fijar Vueltas</button>
+                </div>
+                <label style="display: flex; align-items: center; gap: 5px; color: #aaa; cursor: pointer;">
+                    <input type="checkbox" id="chk-skeleton" checked> Ver Esqueleto
+                </label>
+            </div>
+        </div>
+    </div>
+
+    <!-- CÁMARA, VIDEO Y UI SUPERPUESTA -->
+    <div class="container">
+        <video id="video_element" autoplay playsinline muted></video>
+        <canvas id="canvas_element" width="1280" height="720"></canvas>
+        
+        <div class="overlay-ui">
+            <!-- Velocímetro Circular F1 -->
+            <div class="f1-speedometer" id="speed-dashboard">
+                <svg viewBox="0 0 160 160">
+                    <circle class="speed-track" cx="80" cy="80" r="70"></circle>
+                    <circle class="speed-arc" id="speed-arc" cx="80" cy="80" r="70"></circle>
+                </svg>
+                <div class="speed-data">
+                    <div class="player-label" id="player-label">P1 (VERDE)</div>
+                    <div class="speed-value" id="speed-value">0</div>
+                    <div class="speed-unit">KM/H</div>
+                </div>
+            </div>
+
+            <!-- Contador -->
+            <div class="counter-box">
+                Impulsos: <span id="count">0</span>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // ==========================================
+        // 0. CONTROL DE VENTANA MODAL Y UI
+        // ==========================================
+        const modal = document.getElementById("configModal");
+        function openModal() { modal.style.display = "flex"; }
+        function closeModal() { modal.style.display = "none"; }
+        
+        const MAX_SPEED_GAUGE = 60.0; // Velocidad máxima esperada para llenar el círculo F1
+        const CIRCUMFERENCE = 2 * Math.PI * 70; // Radio del SVG es 70
+
+        function updateUIColors() {
+            const player = document.getElementById('player-select').value;
+            const arc = document.getElementById('speed-arc');
+            const label = document.getElementById('player-label');
+            const unit = document.querySelector('.speed-unit');
+            
+            if(player === 'greencar') {
+                arc.style.stroke = '#4CAF50';
+                unit.style.color = '#4CAF50';
+                label.innerText = 'P1 (VERDE)';
+            } else {
+                arc.style.stroke = '#F44336';
+                unit.style.color = '#F44336';
+                label.innerText = 'P2 (ROJO)';
+            }
+            updateSpeedometer(0); // Reiniciar visualmente
+        }
+
+        function updateSpeedometer(speedVal) {
+            document.getElementById('speed-value').innerText = Math.floor(speedVal); // Mostrar sin decimales
+            // Calcular llenado del arco (270 grados = 75% del círculo total)
+            let percentage = Math.min(speedVal / MAX_SPEED_GAUGE, 1.0);
+            let offset = CIRCUMFERENCE - (percentage * (CIRCUMFERENCE * 0.75));
+            document.getElementById('speed-arc').style.strokeDashoffset = offset;
+        }
+
+        // ==========================================
+        // 1. LÓGICA DE MQTT
+        // ==========================================
+        let mqttClient = null;
+        let isMqttConnected = false;
+
+        function connectMQTT() {
+            const host = document.getElementById('mqtt-host').value.trim();
+            const port = parseInt(document.getElementById('mqtt-port').value);
+            const path = document.getElementById('mqtt-path').value.trim() || "/";
+            const prefix = document.getElementById('mqtt-prefix').value.trim();
+            const statusBadge = document.getElementById('mqtt-status');
+            
+            const clientId = "SkiWeb_" + Math.random().toString(16).substr(2, 8);
+            
+            try {
+                mqttClient = new Paho.MQTT.Client(host, port, path, clientId);
+            } catch (error) {
+                alert("Error. Recuerda no usar HTTPS para WebSockets sin certificados.");
+                return;
+            }
+
+            mqttClient.onConnectionLost = function(responseObject) {
+                isMqttConnected = false;
+                statusBadge.innerText = "Desconectado"; statusBadge.style.backgroundColor = "#d32f2f";
+            };
+
+            mqttClient.onMessageArrived = function(message) {
+                const topic = message.destinationName;
+                const player = document.getElementById('player-select').value;
+                const targetSpeedTopic = player === 'greencar' ? `${prefix}/greenspeed` : `${prefix}/redspeed`;
+
+                if (topic === targetSpeedTopic) {
+                    const speed = parseFloat(message.payloadString);
+                    updateSpeedometer(speed);
+                }
+            };
+
+            const options = {
+                onSuccess: function() {
+                    isMqttConnected = true;
+                    statusBadge.innerText = "Conectado ✅"; statusBadge.style.backgroundColor = "#388e3c";
+                    mqttClient.subscribe(`${prefix}/greenspeed`);
+                    mqttClient.subscribe(`${prefix}/redspeed`);
+                },
+                onFailure: function() {
+                    isMqttConnected = false;
+                    statusBadge.innerText = "Error WS"; statusBadge.style.backgroundColor = "#d32f2f";
+                }
+            };
+
+            statusBadge.innerText = "Conectando..."; statusBadge.style.backgroundColor = "#ff9800";
+            mqttClient.connect(options);
+        }
+
+        function sendMQTTCommand(topic, payload) {
+            if (isMqttConnected && mqttClient) {
+                const message = new Paho.MQTT.Message(payload.toString());
+                message.destinationName = topic;
+                mqttClient.send(message);
+            }
+        }
+
+        function sendF1Start() {
+            const prefix = document.getElementById('mqtt-prefix').value.trim();
+            sendMQTTCommand(`${prefix}/start`, "1");
+            repeticiones = 0; document.getElementById('count').innerText = "0";
+            updateSpeedometer(0);
+            closeModal();
+        }
+
+        function sendLaps() {
+            const prefix = document.getElementById('mqtt-prefix').value.trim();
+            const laps = document.getElementById('laps-input').value;
+            sendMQTTCommand(`${prefix}/set_laps`, laps);
+            alert(`Vueltas enviadas: ${laps}`);
+        }
+
+        // ==========================================
+        // 2. EFECTOS VISUALES (EXPLOSIÓN DE NIEVE)
+        // ==========================================
+        let snowParticles = [];
+
+        function triggerSnowExplosion(originX, originY) {
+            // Genera partículas en círculo desde un punto específico
+            for (let i = 0; i < 40; i++) {
+                let angle = Math.random() * Math.PI * 2;
+                let speed = Math.random() * 8 + 3; // Velocidad de explosión
+                snowParticles.push({
+                    x: originX, 
+                    y: originY,
+                    vx: Math.cos(angle) * speed,
+                    vy: Math.sin(angle) * speed,
+                    r: Math.random() * 4 + 2, // Tamaño
+                    life: 1.0, // Vida (Opacidad)
+                    decay: Math.random() * 0.03 + 0.01 // Qué tan rápido desaparece
+                });
+            }
+        }
+
+        function drawSnow(ctx) {
+            for (let i = snowParticles.length - 1; i >= 0; i--) {
+                let p = snowParticles[i];
+                ctx.fillStyle = `rgba(255, 255, 255, ${p.life})`;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Físicas
+                p.x += p.vx; 
+                p.y += p.vy;
+                p.vy += 0.2; // Gravedad (caen en curva)
+                p.life -= p.decay; // Desvanecimiento
+                
+                // Borrar si "mueren" o se salen
+                if (p.life <= 0 || p.y > canvasElement.height) {
+                    snowParticles.splice(i, 1);
+                }
+            }
+        }
+
+        // ==========================================
+        // 3. LÓGICA DE VISIÓN, ESQUÍ Y TRUCO "GALLINA"
+        // ==========================================
+        const videoElement = document.getElementById('video_element');
+        const canvasElement = document.getElementById('canvas_element');
+        const canvasCtx = canvasElement.getContext('2d');
+        const countDisplay = document.getElementById('count');
+        const statusIndicator = document.getElementById('status-indicator');
+        const chkSkeleton = document.getElementById('chk-skeleton');
+
+        let repeticiones = 0;
+        let estadoEsqui = 'ABAJO';
+        let estadoGallina = 'CERRADO';
+        let isPaused = false;
+        let isProcessing = false;
+
+        const L_SHOULDER = 11, R_SHOULDER = 12;
+        const L_ELBOW = 13, R_ELBOW = 14;
+        const L_WRIST = 15, R_WRIST = 16;
+        const L_HIP = 23, R_HIP = 24;
+
+        function onResults(results) {
+            isProcessing = false;
+            if (isPaused) return;
+
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.poseLandmarks) {
+                if (chkSkeleton.checked) {
+                    drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {color: '#ffffff', lineWidth: 4});
+                    drawLandmarks(canvasCtx, results.poseLandmarks, {color: '#FF0000', lineWidth: 2, radius: 3});
+                }
+                analizarMovimientos(results.poseLandmarks);
+            }
+            
+            drawSnow(canvasCtx);
+            canvasCtx.restore();
+        }
+
+        function analizarMovimientos(landmarks) {
+            // Eje Y (0.0 arriba, 1.0 abajo), Eje X (0.0 izquierda, 1.0 derecha)
+            const mIzqY = landmarks[L_WRIST].y; const mDerY = landmarks[R_WRIST].y;
+            const cIzqX = landmarks[L_ELBOW].x; const cDerX = landmarks[R_ELBOW].x;
+            const hIzqX = landmarks[L_SHOULDER].x; const hDerX = landmarks[R_SHOULDER].x;
+            const hIzqY = landmarks[L_SHOULDER].y; const hDerY = landmarks[R_SHOULDER].y;
+            const cadIzqY = landmarks[L_HIP].y; const cadDerY = landmarks[R_HIP].y;
+
+            // Centro del pecho para lanzar la nieve (Pixel exacto en Canvas)
+            const centroPechoX = ((hIzqX + hDerX) / 2) * canvasElement.width;
+            const centroPechoY = ((hIzqY + hDerY) / 2) * canvasElement.height;
+
+            // --- LÓGICA DEL ESQUÍ (Vertical) ---
+            const torsoLengthIzq = cadIzqY - hIzqY;
+            const torsoLengthDer = cadDerY - hDerY;
+            const mitadTorsoIzq = hIzqY + (torsoLengthIzq * 0.5);
+            const mitadTorsoDer = hDerY + (torsoLengthDer * 0.5);
+            const cercaCaderaIzq = cadIzqY - (torsoLengthIzq * 0.15);
+            const cercaCaderaDer = cadDerY - (torsoLengthDer * 0.15);
+
+            const manosArriba = (mIzqY < mitadTorsoIzq) && (mDerY < mitadTorsoDer);
+            const manosAbajo = (mIzqY > cercaCaderaIzq) && (mDerY > cercaCaderaDer);
+
+            // --- LÓGICA TRUCO GALLINA (Aleteo Horizontal Corto) ---
+            // 1. Manos en la parte superior del pecho (cerca de los hombros en Y)
+            const manosEnPecho = (mIzqY > hIzqY - 0.1 && mIzqY < hIzqY + 0.3) && 
+                                 (mDerY > hDerY - 0.1 && mDerY < hDerY + 0.3);
+            
+            // 2. Distancia de los codos hacia afuera (Eje X) respecto a los hombros
+            const distCodoIzqX = Math.abs(cIzqX - hIzqX);
+            const distCodoDerX = Math.abs(cDerX - hDerX);
+
+            // Umbrales: Si la distancia X es grande, codos separados. Si es pequeña, codos pegados a las costillas.
+            const codosSeparados = distCodoIzqX > 0.12 && distCodoDerX > 0.12;
+            const codosPegados = distCodoIzqX < 0.06 && distCodoDerX < 0.06;
+
+            // Acción Gallina
+            if (manosEnPecho && codosSeparados) {
+                if (estadoGallina !== 'ABIERTO') estadoGallina = 'ABIERTO';
+            } else if (manosEnPecho && codosPegados) {
+                if (estadoGallina === 'ABIERTO') {
+                    estadoGallina = 'CERRADO';
+                    registrarImpulso("¡Nitro Gallina! 🐔💨", 2, centroPechoX, centroPechoY);
+                }
+            }
+
+            // Acción Esquí Normal
+            if (manosArriba && !manosEnPecho) { // Evita choque con gallina
+                if (estadoEsqui !== 'ARRIBA') {
+                    estadoEsqui = 'ARRIBA';
+                    statusIndicator.innerText = "Posición lista";
+                    statusIndicator.style.backgroundColor = "#2196F3"; 
+                }
+            } else if (manosAbajo) {
+                if (estadoEsqui === 'ARRIBA') {
+                    estadoEsqui = 'ABAJO';
+                    registrarImpulso("¡Impulso! ⛷️", 1, centroPechoX, centroPechoY);
+                }
+            }
+        }
+
+        function registrarImpulso(mensaje, cantidad, x, y) {
+            repeticiones += cantidad;
+            countDisplay.innerText = repeticiones;
+            statusIndicator.innerText = mensaje;
+            statusIndicator.style.backgroundColor = cantidad > 1 ? "#9c27b0" : "#4CAF50"; 
+            
+            triggerSnowExplosion(x, y); // Lanza la nieve desde el jugador
+            
+            const prefix = document.getElementById('mqtt-prefix').value.trim();
+            const player = document.getElementById('player-select').value;
+            
+            sendMQTTCommand(`${prefix}/${player}`, "1");
+            if (cantidad > 1) {
+                setTimeout(() => sendMQTTCommand(`${prefix}/${player}`, "1"), 100);
+            }
+
+            countDisplay.style.transform = "scale(1.5)";
+            setTimeout(() => countDisplay.style.transform = "scale(1)", 200);
+        }
+
+        // ==========================================
+        // 4. INICIALIZACIÓN DE CÁMARA (1280x720)
+        // ==========================================
+        const pose = new Pose({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        }});
+
+        pose.setOptions({
+            modelComplexity: 1, smoothLandmarks: true,
+            minDetectionConfidence: 0.5, minTrackingConfidence: 0.5
+        });
+        pose.onResults(onResults);
+
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    // Forzamos resolución HD para la cámara web
+                    video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } }
+                });
+                videoElement.srcObject = stream;
+                videoElement.onloadedmetadata = () => {
+                    videoElement.play();
+                    statusIndicator.innerText = "Cámara HD OK.";
+                    processVideo(); 
+                };
+            } catch (err) {
+                alert("Error de cámara. Permisos o entorno HTTPs.");
+            }
+        }
+
+        async function processVideo() {
+            if (!isPaused && !isProcessing && videoElement.readyState >= 2) {
+                isProcessing = true;
+                await pose.send({image: videoElement});
+            }
+            requestAnimationFrame(processVideo);
+        }
+
+        function togglePause() {
+            isPaused = !isPaused;
+            const btnPause = document.getElementById('btn-pause');
+            btnPause.innerText = isPaused ? "▶️ Reanudar" : "⏸️ Pausar";
+            statusIndicator.innerText = isPaused ? "Pausado" : "Cámara OK.";
+        }
+
+        updateUIColors();
+        startCamera();
+    </script>
+</body>
+</html>
