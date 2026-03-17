@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SkiMotion Counter</title>
+    <!-- MediaPipe Libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #121212;
+            color: #ffffff;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+        .container {
+            position: relative;
+            width: 100%;
+            max-width: 800px;
+        }
+        video {
+            display: none; /* Ocultamos el video original, mostraremos el canvas */
+        }
+        canvas {
+            width: 100%;
+            border-radius: 10px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            background-color: #000;
+        }
+        .ui-panel {
+            margin-top: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            width: 100%;
+            max-width: 800px;
+            background: #1e1e1e;
+            padding: 15px 25px;
+            border-radius: 10px;
+            box-sizing: border-box;
+        }
+        .counter-box {
+            font-size: 2rem;
+            font-weight: bold;
+        }
+        #count {
+            color: #4CAF50;
+            font-size: 3rem;
+        }
+        .controls button {
+            background-color: #0288d1;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            margin-left: 10px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: background-color 0.3s;
+        }
+        .controls button:hover {
+            background-color: #0277bd;
+        }
+        .controls button.danger {
+            background-color: #d32f2f;
+        }
+        .controls button.danger:hover {
+            background-color: #c62828;
+        }
+        #status-indicator {
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: bold;
+            background-color: #ff9800;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>SkiMotion Counter</h1>
+    
+    <div class="container">
+        <video id="video_element" autoplay playsinline></video>
+        <canvas id="canvas_element" width="800" height="600"></canvas>
+    </div>
+
+    <div class="ui-panel">
+        <div class="counter-box">
+            Repeticiones: <span id="count">0</span>
+        </div>
+        <div>
+            <span id="status-indicator">Iniciando...</span>
+        </div>
+        <div class="controls">
+            <button id="btn-pause" onclick="togglePause()">Pausar</button>
+            <button id="btn-reset" class="danger" onclick="resetCounter()">Reiniciar</button>
+        </div>
+    </div>
+
+    <script>
+        // Referencias al DOM
+        const videoElement = document.getElementById('video_element');
+        const canvasElement = document.getElementById('canvas_element');
+        const canvasCtx = canvasElement.getContext('2d');
+        const countDisplay = document.getElementById('count');
+        const statusIndicator = document.getElementById('status-indicator');
+        const btnPause = document.getElementById('btn-pause');
+
+        // Variables de estado del contador
+        let repeticiones = 0;
+        let estadoMovimiento = 'ABAJO'; // Puede ser 'ARRIBA' o 'ABAJO'
+        let isPaused = false;
+
+        // Índices de Landmarks de MediaPipe
+        const NOSE = 0;
+        const LEFT_WRIST = 15;
+        const RIGHT_WRIST = 16;
+        const LEFT_HIP = 23;
+        const RIGHT_HIP = 24;
+
+        function onResults(results) {
+            if (isPaused) return;
+
+            // Limpiar canvas
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.poseLandmarks) {
+                // Dibujar esqueleto (Feedback visual)
+                drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {color: '#ffffff', lineWidth: 4});
+                drawLandmarks(canvasCtx, results.poseLandmarks, {color: '#FF0000', lineWidth: 2});
+
+                // Analizar la pose
+                analizarMovimiento(results.poseLandmarks);
+            }
+
+            canvasCtx.restore();
+        }
+
+        function analizarMovimiento(landmarks) {
+            // En MediaPipe, Y=0 es la parte superior de la imagen y Y=1 es la inferior.
+            const narizY = landmarks[NOSE].y;
+            const munecaIzquierdaY = landmarks[LEFT_WRIST].y;
+            const munecaDerechaY = landmarks[RIGHT_WRIST].y;
+            const caderaIzquierdaY = landmarks[LEFT_HIP].y;
+            const caderaDerechaY = landmarks[RIGHT_HIP].y;
+
+            // Condición 1: Ambas manos están por encima de la cabeza (Y es menor)
+            const manosArriba = munecaIzquierdaY < narizY && munecaDerechaY < narizY;
+            
+            // Condición 2: Ambas manos están por debajo de la cadera (Y es mayor)
+            const manosAbajo = munecaIzquierdaY > caderaIzquierdaY && munecaDerechaY > caderaDerechaY;
+
+            // Máquina de estados para evitar conteos dobles
+            if (manosArriba) {
+                if (estadoMovimiento !== 'ARRIBA') {
+                    estadoMovimiento = 'ARRIBA';
+                    statusIndicator.innerText = "Posición inicial OK";
+                    statusIndicator.style.backgroundColor = "#2196F3"; // Azul
+                }
+            } else if (manosAbajo) {
+                if (estadoMovimiento === 'ARRIBA') {
+                    // Ciclo completado: Arriba -> Abajo
+                    repeticiones += 1;
+                    countDisplay.innerText = repeticiones;
+                    estadoMovimiento = 'ABAJO';
+                    
+                    // Feedback visual de éxito
+                    statusIndicator.innerText = "+1 Repetición!";
+                    statusIndicator.style.backgroundColor = "#4CAF50"; // Verde
+                    
+                    // Efecto visual rápido en el contador
+                    countDisplay.style.color = "white";
+                    setTimeout(() => countDisplay.style.color = "#4CAF50", 300);
+                }
+            }
+        }
+
+        // Configuración de MediaPipe Pose
+        const pose = new Pose({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        }});
+
+        pose.setOptions({
+            modelComplexity: 1, // 0 = Rápido/Baja precisión, 1 = Balanceado, 2 = Alta precisión
+            smoothLandmarks: true,
+            enableSegmentation: false,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        pose.onResults(onResults);
+
+        // Inicializar Cámara
+        const camera = new Camera(videoElement, {
+            onFrame: async () => {
+                await pose.send({image: videoElement});
+            },
+            width: 800,
+            height: 600
+        });
+
+        camera.start().then(() => {
+            statusIndicator.innerText = "Esperando postura...";
+        }).catch(err => {
+            statusIndicator.innerText = "Error de cámara";
+            console.error(err);
+        });
+
+        // Controles de usuario
+        function togglePause() {
+            isPaused = !isPaused;
+            if (isPaused) {
+                btnPause.innerText = "Reanudar";
+                statusIndicator.innerText = "Pausado";
+                statusIndicator.style.backgroundColor = "#ff9800";
+            } else {
+                btnPause.innerText = "Pausar";
+                statusIndicator.innerText = "Esperando postura...";
+            }
+        }
+
+        function resetCounter() {
+            repeticiones = 0;
+            countDisplay.innerText = repeticiones;
+            estadoMovimiento = 'ABAJO';
+            statusIndicator.innerText = "Reiniciado";
+            statusIndicator.style.backgroundColor = "#ff9800";
+        }
+    </script>
+</body>
+</html>

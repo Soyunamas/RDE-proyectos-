@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SkiMotion LED Race Control</title>
+    <!-- Librerías de MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+    <!-- Librería Paho MQTT para Web -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.1.0/paho-mqtt.min.js" crossorigin="anonymous"></script>
+    
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #121212;
+            color: #ffffff;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+        .container { position: relative; width: 100%; max-width: 800px; }
+        video { display: none; }
+        canvas {
+            width: 100%; max-width: 800px;
+            border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            background-color: #000;
+        }
+        .panel {
+            margin-top: 15px; width: 100%; max-width: 800px;
+            background: #1e1e1e; padding: 15px 25px;
+            border-radius: 10px; box-sizing: border-box;
+        }
+        .ui-panel { display: flex; justify-content: space-between; align-items: center; }
+        
+        /* Estilos del Panel de Configuración */
+        .config-grid {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 15px; margin-bottom: 15px;
+        }
+        .config-item { display: flex; flex-direction: column; }
+        .config-item label { font-size: 0.85rem; color: #aaa; margin-bottom: 5px; }
+        .config-item input, .config-item select {
+            background-color: #2c2c2c; color: white; border: 1px solid #444;
+            padding: 8px; border-radius: 5px; font-size: 1rem;
+        }
+        .checkbox-item { flex-direction: row; align-items: center; gap: 10px; margin-top: 10px;}
+        
+        .counter-box { font-size: 2rem; font-weight: bold; }
+        #count { color: #4CAF50; font-size: 3rem; }
+        
+        button {
+            background-color: #0288d1; color: white; border: none;
+            padding: 10px 15px; border-radius: 5px; cursor: pointer;
+            font-size: 1rem; font-weight: bold; transition: 0.3s;
+        }
+        button:hover { background-color: #0277bd; }
+        button.danger { background-color: #d32f2f; }
+        button.danger:hover { background-color: #c62828; }
+        button.success { background-color: #388e3c; }
+        button.success:hover { background-color: #2e7d32; }
+        
+        .race-controls { display: flex; gap: 10px; justify-content: center; margin-top: 15px; padding-top: 15px; border-top: 1px solid #333;}
+        
+        #status-indicator, #mqtt-status {
+            padding: 5px 15px; border-radius: 20px; font-size: 0.9rem; font-weight: bold;
+        }
+        #status-indicator { background-color: #ff9800; }
+        #mqtt-status { background-color: #d32f2f; color: white; }
+    </style>
+</head>
+<body>
+
+    <h1>SkiMotion Carrera LED</h1>
+    
+    <!-- PANEL DE CONFIGURACIÓN MQTT -->
+    <div class="panel">
+        <h3>⚙️ Configuración del Servidor y Carrera</h3>
+        <div class="config-grid">
+            <div class="config-item">
+                <label>Broker MQTT (IP o URL):</label>
+                <input type="text" id="mqtt-host" value="192.168.1.100">
+            </div>
+            <div class="config-item">
+                <label>Puerto WebSockets (ej. 9001):</label>
+                <input type="number" id="mqtt-port" value="9001">
+            </div>
+            <div class="config-item">
+                <label>Asignar cámara a:</label>
+                <select id="mqtt-topic">
+                    <option value="skimotion/control/greencar">🟢 Coche Verde (Green Car)</option>
+                    <option value="skimotion/control/redcar">🔴 Coche Rojo (Red Car)</option>
+                </select>
+            </div>
+            <div class="config-item checkbox-item">
+                <input type="checkbox" id="chk-skeleton" checked>
+                <label for="chk-skeleton" style="margin:0; font-size:1rem; color:white;">Mostrar Esqueleto</label>
+            </div>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <button onclick="connectMQTT()">🔌 Conectar a Mosquitto</button>
+            <span id="mqtt-status">Desconectado</span>
+        </div>
+
+        <div class="race-controls">
+            <button class="success" onclick="sendMQTTCommand('skimotion/control/start')">🏁 INICIAR CARRERA</button>
+            <button class="danger" onclick="sendMQTTCommand('skimotion/control/restart')">🔄 REINICIAR PISTA</button>
+        </div>
+    </div>
+
+    <!-- CÁMARA Y VIDEO -->
+    <div class="container">
+        <video id="video_element" autoplay playsinline muted></video>
+        <canvas id="canvas_element" width="800" height="600"></canvas>
+    </div>
+
+    <!-- CONTROLES DE INTERFAZ -->
+    <div class="panel ui-panel">
+        <div class="counter-box">
+            Avanza: <span id="count">0</span>
+        </div>
+        <div>
+            <span id="status-indicator">Iniciando cámara...</span>
+        </div>
+        <div>
+            <button id="btn-pause" onclick="togglePause()">Pausar Visión</button>
+            <button id="btn-reset" class="danger" onclick="resetCounter()">Reset Local</button>
+        </div>
+    </div>
+
+    <script>
+        // ==========================================
+        // 1. LÓGICA DE MQTT (Paho JavaScript)
+        // ==========================================
+        let mqttClient = null;
+        let isMqttConnected = false;
+
+        function connectMQTT() {
+            const host = document.getElementById('mqtt-host').value;
+            const port = parseInt(document.getElementById('mqtt-port').value);
+            const statusBadge = document.getElementById('mqtt-status');
+            
+            // Generar un ID de cliente aleatorio para evitar colisiones
+            const clientId = "SkiWeb_" + Math.random().toString(16).substr(2, 8);
+            
+            mqttClient = new Paho.MQTT.Client(host, port, clientId);
+
+            mqttClient.onConnectionLost = function(responseObject) {
+                isMqttConnected = false;
+                statusBadge.innerText = "Desconectado";
+                statusBadge.style.backgroundColor = "#d32f2f";
+                console.log("MQTT Perdido: " + responseObject.errorMessage);
+            };
+
+            const options = {
+                onSuccess: function() {
+                    isMqttConnected = true;
+                    statusBadge.innerText = "Conectado ✅";
+                    statusBadge.style.backgroundColor = "#388e3c";
+                    console.log("Conectado a Mosquitto!");
+                },
+                onFailure: function(message) {
+                    isMqttConnected = false;
+                    statusBadge.innerText = "Error de conexión";
+                    statusBadge.style.backgroundColor = "#d32f2f";
+                    alert("Falló la conexión MQTT. ¿Está Mosquitto configurado para WebSockets en el puerto " + port + "?");
+                }
+            };
+
+            statusBadge.innerText = "Conectando...";
+            statusBadge.style.backgroundColor = "#ff9800";
+            mqttClient.connect(options);
+        }
+
+        function sendMQTTCommand(topic) {
+            if (isMqttConnected && mqttClient) {
+                const message = new Paho.MQTT.Message("1");
+                message.destinationName = topic;
+                mqttClient.send(message);
+                console.log("Enviado '1' a -> " + topic);
+            } else {
+                alert("Debes conectarte al servidor MQTT primero.");
+            }
+        }
+
+
+        // ==========================================
+        // 2. LÓGICA DE VISIÓN Y MEDIAPIPE
+        // ==========================================
+        const videoElement = document.getElementById('video_element');
+        const canvasElement = document.getElementById('canvas_element');
+        const canvasCtx = canvasElement.getContext('2d');
+        const countDisplay = document.getElementById('count');
+        const statusIndicator = document.getElementById('status-indicator');
+        const btnPause = document.getElementById('btn-pause');
+        const chkSkeleton = document.getElementById('chk-skeleton');
+
+        let repeticiones = 0;
+        let estadoMovimiento = 'ABAJO';
+        let isPaused = false;
+        let isProcessing = false;
+
+        const LEFT_SHOULDER = 11, RIGHT_SHOULDER = 12;
+        const LEFT_WRIST = 15, RIGHT_WRIST = 16;
+        const LEFT_HIP = 23, RIGHT_HIP = 24;
+
+        function onResults(results) {
+            isProcessing = false;
+            if (isPaused) return;
+
+            canvasCtx.save();
+            canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+            canvasCtx.drawImage(results.image, 0, 0, canvasElement.width, canvasElement.height);
+
+            if (results.poseLandmarks) {
+                // Dibujar esqueleto solo si la opción está activada
+                if (chkSkeleton.checked) {
+                    drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, {color: '#ffffff', lineWidth: 4});
+                    drawLandmarks(canvasCtx, results.poseLandmarks, {color: '#FF0000', lineWidth: 2});
+                }
+                analizarMovimiento(results.poseLandmarks);
+            }
+            canvasCtx.restore();
+        }
+
+        function analizarMovimiento(landmarks) {
+            const munecaIzquierdaY = landmarks[LEFT_WRIST].y;
+            const munecaDerechaY = landmarks[RIGHT_WRIST].y;
+            const hombroIzquierdoY = landmarks[LEFT_SHOULDER].y;
+            const hombroDerechoY = landmarks[RIGHT_SHOULDER].y;
+            const caderaIzquierdaY = landmarks[LEFT_HIP].y;
+            const caderaDerechaY = landmarks[RIGHT_HIP].y;
+
+            const mitadTorsoIzquierdoY = (hombroIzquierdoY + caderaIzquierdaY) / 2;
+            const mitadTorsoDerechoY = (hombroDerechoY + caderaDerechaY) / 2;
+
+            const manosArriba = munecaIzquierdaY < hombroIzquierdoY && munecaDerechaY < hombroDerechoY;
+            const manosAbajo = munecaIzquierdaY > mitadTorsoIzquierdoY && munecaDerechaY > mitadTorsoDerechoY;
+
+            if (manosArriba) {
+                if (estadoMovimiento !== 'ARRIBA') {
+                    estadoMovimiento = 'ARRIBA';
+                    statusIndicator.innerText = "Posición inicial OK";
+                    statusIndicator.style.backgroundColor = "#2196F3"; 
+                }
+            } else if (manosAbajo) {
+                if (estadoMovimiento === 'ARRIBA') {
+                    repeticiones += 1;
+                    countDisplay.innerText = repeticiones;
+                    estadoMovimiento = 'ABAJO';
+                    
+                    statusIndicator.innerText = "¡Avance!";
+                    statusIndicator.style.backgroundColor = "#4CAF50"; 
+                    
+                    // --- ENVIAR MOVIMIENTO POR MQTT ---
+                    const selectedCarTopic = document.getElementById('mqtt-topic').value;
+                    sendMQTTCommand(selectedCarTopic);
+                    // ----------------------------------
+
+                    countDisplay.style.color = "white";
+                    setTimeout(() => countDisplay.style.color = "#4CAF50", 300);
+                }
+            }
+        }
+
+        const pose = new Pose({locateFile: (file) => {
+            return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+        }});
+
+        pose.setOptions({
+            modelComplexity: 1,
+            smoothLandmarks: true,
+            enableSegmentation: false,
+            minDetectionConfidence: 0.5,
+            minTrackingConfidence: 0.5
+        });
+
+        pose.onResults(onResults);
+
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: "user", width: { ideal: 800 }, height: { ideal: 600 } }
+                });
+                videoElement.srcObject = stream;
+                videoElement.onloadedmetadata = () => {
+                    videoElement.play();
+                    statusIndicator.innerText = "Esperando postura...";
+                    processVideo(); 
+                };
+            } catch (err) {
+                statusIndicator.innerText = "Error de cámara";
+                alert("No se pudo iniciar la cámara: " + err.message);
+            }
+        }
+
+        async function processVideo() {
+            if (!isPaused && !isProcessing && videoElement.readyState >= 2) {
+                isProcessing = true;
+                await pose.send({image: videoElement});
+            }
+            requestAnimationFrame(processVideo);
+        }
+
+        startCamera();
+
+        function togglePause() {
+            isPaused = !isPaused;
+            if (isPaused) {
+                btnPause.innerText = "Reanudar Visión";
+                statusIndicator.innerText = "Pausado";
+                statusIndicator.style.backgroundColor = "#ff9800";
+            } else {
+                btnPause.innerText = "Pausar Visión";
+                statusIndicator.innerText = "Esperando postura...";
+            }
+        }
+
+        function resetCounter() {
+            repeticiones = 0;
+            countDisplay.innerText = repeticiones;
+            estadoMovimiento = 'ABAJO';
+            statusIndicator.innerText = "Reiniciado";
+            statusIndicator.style.backgroundColor = "#ff9800";
+        }
+    </script>
+</body>
+</html>
